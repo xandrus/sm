@@ -120,6 +120,10 @@ class LinstorVolumeManager(object):
     # the current pool status after N elapsed seconds.
     STORAGE_POOLS_FETCH_INTERVAL = 15
 
+    # Contains the data of the "/var/lib/linstor" directory.
+    DATABASE_NAME = 'xcp-persistent-database'
+    DATABASE_SIZE = 1 << 30  # 1GB.
+
     @staticmethod
     def default_logger(*args):
         print(args)
@@ -1227,7 +1231,14 @@ class LinstorVolumeManager(object):
                     )
                 )
 
-        # 3. Remove storage pools/resource/volume group in the case of errors.
+            # 3. Create the LINSTOR database volume.
+            try:
+                cls._create_database_volume(lin, group_name)
+            except LinstorVolumeManagerError as e:
+                if e.code != LinstorVolumeManagerError.ERR_VOLUME_EXISTS:
+                    cls._force_destroy_database_volume(lin, group_name)
+                raise
+        # 4. Remove storage pools/resource/volume group in the case of errors.
         except Exception as e:
             try:
                 cls._destroy_resource_group(lin, group_name)
@@ -1243,7 +1254,7 @@ class LinstorVolumeManager(object):
                 j += 1
             raise e
 
-        # 4. Return new instance.
+        # 5. Return new instance.
         instance = cls.__new__(cls)
         instance._uri = uri
         instance._linstor = lin
@@ -1535,12 +1546,8 @@ class LinstorVolumeManager(object):
             # before the `self._create_volume` case.
             # It can only happen if the same volume uuid is used in the same
             # call in another host.
-            if e.code == LinstorVolumeManagerError.ERR_VOLUME_EXISTS:
-                raise
-            self._force_destroy_volume(volume_uuid)
-            raise
-        except Exception:
-            self._force_destroy_volume(volume_uuid)
+            if e.code != LinstorVolumeManagerError.ERR_VOLUME_EXISTS:
+                self._force_destroy_volume(volume_uuid)
             raise
 
     def _find_device_path(self, volume_uuid, volume_name):
@@ -1798,6 +1805,60 @@ class LinstorVolumeManager(object):
             maxretry=60,
             exceptions=[linstor.errors.LinstorNetworkError]
         )
+
+    @classmethod
+    def _create_database_volume(cls, lin, group_name):
+        for dfn in lin.resource_dfn_list_raise().resource_definitions:
+            if cls.DATABASE_NAME == dfn.name:
+                raise LinstorVolumeManagerError(
+                    'Could not create volume `{}` from SR `{}`, '.format(
+                        cls.DATABASE_NAME, group_name
+                    ) + 'resource of the same name already exists in LINSTOR'
+                )
+
+        size = cls.round_up_volume_size(cls.DATABASE_SIZE)
+        errors = cls._filter_errors(lin.resource_group_spawn(
+            rsc_grp_name=group_name,
+            rsc_dfn_name=cls.DATABASE_NAME,
+            vlm_sizes=['{}B'.format(size)],
+            definitions_only=False
+        ))
+
+        if cls._check_errors(errors, [
+            linstor.consts.FAIL_EXISTS_RSC, linstor.consts.FAIL_EXISTS_RSC_DFN
+        ]):
+            raise LinstorVolumeManagerError(
+                'Failed to create volume `{}` from SR `{}`, it already exists'
+                .format(cls.DATABASE_NAME, group_name),
+                LinstorVolumeManagerError.ERR_VOLUME_EXISTS
+            )
+
+        if errors:
+            raise LinstorVolumeManagerError(
+                'Failed to create volume `{}` from SR `{}`: {}'.format(
+                    cls.DATABASE_NAME,
+                    group_name,
+                    cls._get_error_str(errors)
+                )
+            )
+
+    @classmethod
+    def _destroy_database_volume(cls, lin, group_name):
+        error_str = cls._get_error_str(
+            lin.resource_dfn_delete(cls.DATABASE_NAME)
+        )
+        if error_str:
+            raise LinstorVolumeManagerError(
+                'Could not destroy resource `{}` from SR `{}`: {}'
+                .format(cls.DATABASE_NAME, group_name, error_str)
+            )
+
+    @classmethod
+    def _force_destroy_database_volume(cls, lin, group_name):
+        try:
+            cls._destroy_database_volume(lin, group_name)
+        except Exception:
+            pass
 
     @classmethod
     def _destroy_storage_pool(cls, lin, group_name, node_name):
