@@ -1572,7 +1572,10 @@ class LinstorVolumeManager(object):
 
         if not resources:
             if activate:
-                self._activate_device_path(node_name, volume_name)
+                self._mark_resource_cache_as_dirty()
+                self._activate_device_path(
+                    self._linstor, node_name, volume_name
+                )
                 return self._request_device_path(volume_uuid, volume_name)
             raise LinstorVolumeManagerError(
                 'Empty dev path for `{}`, but definition "seems" to exist'
@@ -1580,25 +1583,6 @@ class LinstorVolumeManager(object):
             )
         # Contains a path of the /dev/drbd<id> form.
         return resources[0].volumes[0].device_path
-
-    def _activate_device_path(self, node_name, volume_name):
-        self._mark_resource_cache_as_dirty()
-        result = self._linstor.resource_create([
-            linstor.ResourceData(node_name, volume_name, diskless=True)
-        ])
-        if linstor.Linstor.all_api_responses_no_error(result):
-            return
-        errors = linstor.Linstor.filter_api_call_response_errors(result)
-        if len(errors) == 1 and errors[0].is_error(
-            linstor.consts.FAIL_EXISTS_RSC
-        ):
-            return
-
-        raise LinstorVolumeManagerError(
-            'Unable to activate device path of `{}` on node `{}`: {}'
-            .format(volume_name, node_name, ', '.join(
-                [str(x) for x in result]))
-        )
 
     def _destroy_resource(self, resource_name):
         self._mark_resource_cache_as_dirty()
@@ -1794,6 +1778,25 @@ class LinstorVolumeManager(object):
             maxretry=60,
             exceptions=[linstor.errors.LinstorNetworkError]
         )
+
+    @classmethod
+    def _activate_device_path(cls, lin, node_name, volume_name):
+        result = lin.resource_create([
+            linstor.ResourceData(node_name, volume_name, diskless=True)
+        ])
+        if linstor.Linstor.all_api_responses_no_error(result):
+            return
+        errors = linstor.Linstor.filter_api_call_response_errors(result)
+        if len(errors) == 1 and errors[0].is_error(
+            linstor.consts.FAIL_EXISTS_RSC
+        ):
+            return
+
+        raise LinstorVolumeManagerError(
+            'Unable to activate device path of `{}` on node `{}`: {}'
+            .format(volume_name, node_name, ', '.join(
+                [str(x) for x in result]))
+            )
 
     @classmethod
     def _create_database_volume(cls, lin, group_name):
