@@ -20,9 +20,11 @@ import json
 import linstor
 import os.path
 import re
+import shutil
 import socket
 import time
 import util
+import uuid
 
 
 def round_up(value, divisor):
@@ -121,8 +123,9 @@ class LinstorVolumeManager(object):
     STORAGE_POOLS_FETCH_INTERVAL = 15
 
     # Contains the data of the "/var/lib/linstor" directory.
-    DATABASE_NAME = 'xcp-persistent-database'
+    DATABASE_VOLUME_NAME = 'xcp-persistent-database'
     DATABASE_SIZE = 1 << 30  # 1GB.
+    DATABASE_PATH = '/var/lib/linstor'
 
     @staticmethod
     def default_logger(*args):
@@ -1231,9 +1234,10 @@ class LinstorVolumeManager(object):
                     )
                 )
 
-            # 3. Create the LINSTOR database volume.
+            # 3. Create the LINSTOR database volume and mount it.
             try:
-                cls._create_database_volume(lin, group_name)
+                volume_path = cls._create_database_volume(lin, group_name) # TODO: check path exist
+                cls._mount_database_volume(volume_path)
             except LinstorVolumeManagerError as e:
                 if e.code != LinstorVolumeManagerError.ERR_VOLUME_EXISTS:
                     cls._force_destroy_database_volume(lin, group_name)
@@ -1473,26 +1477,6 @@ class LinstorVolumeManager(object):
 
         return self._storage_pools
 
-    def _check_volume_creation_errors(self, result, volume_uuid):
-        errors = self._filter_errors(result)
-        if self._check_errors(errors, [
-            linstor.consts.FAIL_EXISTS_RSC, linstor.consts.FAIL_EXISTS_RSC_DFN
-        ]):
-            raise LinstorVolumeManagerError(
-                'Failed to create volume `{}` from SR `{}`, it already exists'
-                .format(volume_uuid, self._group_name),
-                LinstorVolumeManagerError.ERR_VOLUME_EXISTS
-            )
-
-        if errors:
-            raise LinstorVolumeManagerError(
-                'Failed to create volume `{}` from SR `{}`: {}'.format(
-                    volume_uuid,
-                    self._group_name,
-                    self._get_error_str(errors)
-                )
-            )
-
     def _create_volume(self, volume_uuid, volume_name, size, place_resources):
         size = self.round_up_volume_size(size)
 
@@ -1502,7 +1486,7 @@ class LinstorVolumeManager(object):
             rsc_dfn_name=volume_name,
             vlm_sizes=['{}B'.format(size)],
             definitions_only=not place_resources
-        ), volume_uuid)
+        ), volume_uuid, self._group_name)
 
     def _create_volume_with_properties(
         self, volume_uuid, volume_name, size, place_resources
@@ -1808,50 +1792,88 @@ class LinstorVolumeManager(object):
 
     @classmethod
     def _create_database_volume(cls, lin, group_name):
-        for dfn in lin.resource_dfn_list_raise().resource_definitions:
-            if cls.DATABASE_NAME == dfn.name:
-                raise LinstorVolumeManagerError(
-                    'Could not create volume `{}` from SR `{}`, '.format(
-                        cls.DATABASE_NAME, group_name
-                    ) + 'resource of the same name already exists in LINSTOR'
-                )
-
-        size = cls.round_up_volume_size(cls.DATABASE_SIZE)
-        errors = cls._filter_errors(lin.resource_group_spawn(
-            rsc_grp_name=group_name,
-            rsc_dfn_name=cls.DATABASE_NAME,
-            vlm_sizes=['{}B'.format(size)],
-            definitions_only=False
-        ))
-
-        if cls._check_errors(errors, [
-            linstor.consts.FAIL_EXISTS_RSC, linstor.consts.FAIL_EXISTS_RSC_DFN
-        ]):
+        if lin.resource_dfn_list_raise().resource_definitions:
             raise LinstorVolumeManagerError(
-                'Failed to create volume `{}` from SR `{}`, it already exists'
-                .format(cls.DATABASE_NAME, group_name),
-                LinstorVolumeManagerError.ERR_VOLUME_EXISTS
+                'Could not create volume `{}` from SR `{}`, '.format(
+                    cls.DATABASE_VOLUME_NAME, group_name
+                ) + 'LINSTOR volume list must be empty.'
             )
 
-        if errors:
+        size = cls.round_up_volume_size(cls.DATABASE_SIZE)
+        cls._check_volume_creation_errors(lin.resource_group_spawn(
+            rsc_grp_name=group_name,
+            rsc_dfn_name=cls.DATABASE_VOLUME_NAME,
+            vlm_sizes=['{}B'.format(size)],
+            definitions_only=False
+        ), cls.DATABASE_VOLUME_NAME, group_name)
+
+        try:
+            util.pread2(['mkfs.xfs', volume_path])
+        except util.CommandException as e:
             raise LinstorVolumeManagerError(
-                'Failed to create volume `{}` from SR `{}`: {}'.format(
-                    cls.DATABASE_NAME,
-                    group_name,
-                    cls._get_error_str(errors)
-                )
+              'Failed to execute mkfs.xfs on database volume: {}'
+              .format(e.code)
             )
 
     @classmethod
     def _destroy_database_volume(cls, lin, group_name):
         error_str = cls._get_error_str(
-            lin.resource_dfn_delete(cls.DATABASE_NAME)
+            lin.resource_dfn_delete(cls.DATABASE_VOLUME_NAME)
         )
         if error_str:
             raise LinstorVolumeManagerError(
                 'Could not destroy resource `{}` from SR `{}`: {}'
-                .format(cls.DATABASE_NAME, group_name, error_str)
+                .format(cls.DATABASE_VOLUME_NAME, group_name, error_str)
             )
+
+    @classmethod
+    def _mount_database_volume(cls, volume_path):
+        backup_path = cls.DATABASE_PATH + '-' + str(uuid.uuid4())
+
+        try:
+            # 1. First we must disable the controller to move safely the
+            # LINSTOR config.
+            cls._start_controller(start=False)
+
+            # 2. Create a backup config folder.
+            try:
+                os.mkdir(backup_path)
+            except Exception as e:
+                raise LinstorVolumeManager(
+                    'Failed to create backup path {} of LINSTOR config: {}'
+                    .format(backup_path, e)
+                )
+
+            # 3. Move the config in the mounted volume.
+            cls._move_files(cls.DATABASE_PATH, backup_path)
+            cls._mount_volume(volume_path, cls.DATABASE_PATH)
+            cls._move_files(backup_path, cls.DATABASE_PATH)
+
+            # 4. Remove useless backup directory.
+            try:
+                os.rmdir(backup_path)
+            except Exception:
+                raise LinstorVolumeManager(
+                    'Failed to remove backup path {} of LINSTOR config {}'
+                    .format(backup_path, e)
+                )
+        except Exception as e:
+            try:
+                cls._move_files(backup_path, cls.DATABASE_PATH)
+            except Exception:
+                pass
+
+            try:
+                os.rmdir(backup_path)
+            except Exception:
+                pass
+
+            raise e
+        finally:
+            try:
+                cls._start_controller(start=True)
+            except Exception:
+                pass
 
     @classmethod
     def _force_destroy_database_volume(cls, lin, group_name):
@@ -1888,6 +1910,51 @@ class LinstorVolumeManager(object):
         # `VG/LV`. "/" is not accepted by LINSTOR.
         return '{}{}'.format(cls.PREFIX_SR, base_name.replace('/', '_'))
 
+    @classmethod
+    def _check_volume_creation_errors(cls, result, volume_uuid, group_name):
+        errors = cls._filter_errors(result)
+        if cls._check_errors(errors, [
+            linstor.consts.FAIL_EXISTS_RSC, linstor.consts.FAIL_EXISTS_RSC_DFN
+        ]):
+            raise LinstorVolumeManagerError(
+                'Failed to create volume `{}` from SR `{}`, it already exists'
+                .format(volume_uuid, group_name),
+                LinstorVolumeManagerError.ERR_VOLUME_EXISTS
+            )
+
+        if errors:
+            raise LinstorVolumeManagerError(
+                'Failed to create volume `{}` from SR `{}`: {}'.format(
+                    volume_uuid,
+                    group_name,
+                    cls._get_error_str(errors)
+                )
+            )
+
+    @classmethod
+    def _move_files(cls, src_dir, dest_dir, force=False):
+        try:
+            assert force or not os.listdir(dest_dir)
+
+            for file in os.listdir(src_dir):
+                try:
+                    shutil.move(file, dest_dir)
+                except Exception as e:
+                    if not force:
+                        raise e
+        except Exception as e:
+            if not force:
+                try:
+                    cls._move_files(dest_dir, src_dir, force=True)
+                except Exception:
+                    pass
+
+            raise LinstorVolumeManagerError(
+                'Failed to move files from {} to {}: {}'.format(
+                    src_dir, dest_dir, e
+                )
+            )
+
     @staticmethod
     def _get_filtered_properties(properties):
         return dict(properties.items())
@@ -1906,3 +1973,25 @@ class LinstorVolumeManager(object):
                 if err.is_error(code):
                     return True
         return False
+
+    @staticmethod
+    def _start_controller(start=True):
+        action = 'start' if start else 'stop'
+        (ret, out, err) = util.doexec([
+            'systemctl', action, 'linstor-controller'
+        ])
+        if ret != 0:
+            raise LinstorVolumeManagerError(
+                'Failed to {} linstor-controller: {} {}'
+                .format(action, out, err)
+            )
+
+    @staticmethod
+    def _mount_volume(volume_path, mountpoint):
+        try:
+            util.pread(['mount', volume_path, mountpoint])
+        except util.CommandException as e:
+            raise LinstorVolumeManagerError(
+                'Failed to mount volume {} on {}: {}'
+                .format(volume_path, mountpoint, e.code)
+            )
