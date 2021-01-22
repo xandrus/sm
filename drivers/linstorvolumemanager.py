@@ -1850,7 +1850,9 @@ class LinstorVolumeManager(object):
                 cls._activate_device_path(
                     lin, node_name, cls.DATABASE_VOLUME_NAME
                 )
-                return cls._request_device_path(volume_uuid, volume_name)
+                return cls._request_device_path(
+                    cls.DATABASE_VOLUME_NAME, cls.DATABASE_VOLUME_NAME
+                )
             raise LinstorVolumeManagerError(
                 'Empty dev path for `{}`, but definition "seems" to exist'
                 .format(cls.DATABASE_PATH)
@@ -1936,7 +1938,7 @@ class LinstorVolumeManager(object):
             try:
                 os.mkdir(backup_path)
             except Exception as e:
-                raise LinstorVolumeManager(
+                raise LinstorVolumeManagerError(
                     'Failed to create backup path {} of LINSTOR config: {}'
                     .format(backup_path, e)
                 )
@@ -2122,6 +2124,6 @@ class LinstorVolumeManager(object):
                     util.pread(['umount', mountpoint])
             except util.CommandException as e:
                 raise LinstorVolumeManagerError(
-                    'Failed to umount volume on {}: {}'
+                    'Failed to umount volume {} on {}: {}'
                     .format(volume_path, mountpoint, e.code)
                 )
