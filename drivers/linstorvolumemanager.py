@@ -1799,8 +1799,46 @@ class LinstorVolumeManager(object):
             )
 
     @classmethod
+    def _request_database_path(cls, lin, activate=False):
+        node_name = socket.gethostname()
+
+        try:
+            resources = filter(
+                lambda resource: resource.node_name == node_name and
+                resource.name == cls.DATABASE_VOLUME_NAME,
+                lin.resource_list_raise().resources
+            )
+        except Exception as e:
+            raise LinstorVolumeManagerError(
+                'Unable to get resources during database creation: {}'
+                .format(e)
+            )
+
+        if not resources:
+            if activate:
+                cls._activate_device_path(
+                    lin, node_name, cls.DATABASE_VOLUME_NAME
+                )
+                return cls._request_device_path(volume_uuid, volume_name)
+            raise LinstorVolumeManagerError(
+                'Empty dev path for `{}`, but definition "seems" to exist'
+                .format(cls.DATABASE_PATH)
+            )
+        # Contains a path of the /dev/drbd<id> form.
+        return resources[0].volumes[0].device_path
+
+    @classmethod
     def _create_database_volume(cls, lin, group_name):
-        if lin.resource_dfn_list_raise().resource_definitions:
+        try:
+            dfns = lin.resource_dfn_list_raise().resource_definitions
+        except Exception as e:
+            # FIXME: Check if exist before.
+            raise LinstorVolumeManagerError(
+                'Unable to get definitions during database creation: {}'
+                .format(e)
+            )
+
+        if dfns:
             raise LinstorVolumeManagerError(
                 'Could not create volume `{}` from SR `{}`, '.format(
                     cls.DATABASE_VOLUME_NAME, group_name
@@ -1815,13 +1853,33 @@ class LinstorVolumeManager(object):
             definitions_only=False
         ), cls.DATABASE_VOLUME_NAME, group_name)
 
+        current_device_path = cls._request_database_path(lin, activate=True)
+
+        # We use realpath here to get the /dev/drbd<id> path instead of
+        # /dev/drbd/by-res/<resource_name>.
+        expected_device_path = cls.build_device_path(cls.DATABASE_VOLUME_NAME)
+        util.wait_for_path(expected_device_path, 5)
+
+        device_realpath = os.path.realpath(expected_device_path)
+        if current_device_path != device_realpath:
+            raise LinstorVolumeManagerError(
+                'Invalid path, current={}, expected={} (realpath={})'
+                .format(
+                    current_device_path,
+                    expected_device_path,
+                    device_realpath
+                )
+            )
+
         try:
-            util.pread2(['mkfs.xfs', volume_path])
+            util.pread2(['mkfs.xfs', expected_device_path])
         except util.CommandException as e:
             raise LinstorVolumeManagerError(
               'Failed to execute mkfs.xfs on database volume: {}'
               .format(e.code)
             )
+
+        return expected_device_path
 
     @classmethod
     def _destroy_database_volume(cls, lin, group_name):
@@ -1956,7 +2014,7 @@ class LinstorVolumeManager(object):
 
             for file in os.listdir(src_dir):
                 try:
-                    shutil.move(file, dest_dir)
+                    shutil.move(os.path.join(src_dir, file), dest_dir)
                 except Exception as e:
                     if not force:
                         raise e
