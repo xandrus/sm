@@ -171,6 +171,17 @@ class LinstorVolumeManager(object):
         self._linstor = self._create_linstor_instance(uri)
         self._base_group_name = group_name
 
+        # Ensure database is correctly mounted.
+        # TODO: Maybe wait for sync if necessary.
+        try:
+            if not self._is_mounted(self.DATABASE_PATH):
+                self._mount_database_volume(
+                    # TODO: Maybe avoid build device path.
+                    self.build_device_path(self.DATABASE_VOLUME_NAME)
+                )
+        finally:
+            self._linstor = self._create_linstor_instance(uri)
+
         # Ensure group exists.
         group_name = self._build_group_name(group_name)
         groups = self._linstor.resource_group_list_raise([group_name])
@@ -1086,13 +1097,31 @@ class LinstorVolumeManager(object):
         :param bool force: Try to destroy volumes before if true.
         """
 
+        # 1. Destroy volumes if asked.
         if (force):
             for volume_uuid in self._volumes:
                 self.destroy_volume(volume_uuid)
 
+        # 2. Ensure we don't have remaining volumes.
+        # TODO.
+        # if volume_name in self._fetch_resource_names():
+
+        # 3. Umount LINSTOR database.
+        self._mount_database_volume(
+            self.build_device_path(self.DATABASE_VOLUME_NAME), mount=False
+        )
+
+        # Ensure we are connected because controller has been
+        # restarted during unmount call.
+        self._linstor = self._create_linstor_instance(self._uri)
+
+        # 4. Destroy database volume.
+        self._destroy_resource(self.DATABASE_VOLUME_NAME)
+
         # TODO: Throw exceptions in the helpers below if necessary.
         # TODO: What's the required action if it exists remaining volumes?
 
+        # 4. Destroy group and storage pools.
         self._destroy_resource_group(self._linstor, self._group_name)
         for pool in self._get_storage_pools(force=True):
             self._destroy_storage_pool(
@@ -1893,7 +1922,7 @@ class LinstorVolumeManager(object):
             )
 
     @classmethod
-    def _mount_database_volume(cls, volume_path):
+    def _mount_database_volume(cls, volume_path, mount=True):
         backup_path = cls.DATABASE_PATH + '-' + str(uuid.uuid4())
 
         try:
@@ -1912,7 +1941,7 @@ class LinstorVolumeManager(object):
 
             # 3. Move the config in the mounted volume.
             cls._move_files(cls.DATABASE_PATH, backup_path)
-            cls._mount_volume(volume_path, cls.DATABASE_PATH)
+            cls._mount_volume(volume_path, cls.DATABASE_PATH, mount)
             cls._move_files(backup_path, cls.DATABASE_PATH)
 
             # 4. Remove useless backup directory.
@@ -1930,15 +1959,23 @@ class LinstorVolumeManager(object):
                 except Exception:
                     pass
 
-            if cls._is_mounted(cls.DATABASE_PATH):
+            if (
+                mount and cls._is_mounted(cls.DATABASE_PATH)
+            ) or (
+                not mount and not cls._is_mounted(cls.DATABASE_PATH)
+            ):
                 force_exec(lambda: cls._move_files(
                     cls.DATABASE_PATH, backup_path
                 ))
-                force_exec(lambda: cls._umount_volume(
-                    volume_path, cls.DATABASE_PATH
+                force_exec(lambda: cls._mount_volume(
+                    volume_path, cls.DATABASE_PATH, not mount
                 ))
 
-            if not cls._is_mounted(cls.DATABASE_PATH):
+            if (
+                mount and not cls._is_mounted(cls.DATABASE_PATH)
+            ) or (
+                not mount and cls._is_mounted(cls.DATABASE_PATH)
+            ):
                 force_exec(lambda: cls._move_files(
                     backup_path, cls.DATABASE_PATH
                 ))
@@ -2067,23 +2104,22 @@ class LinstorVolumeManager(object):
         (ret, out, err) = util.doexec(['mountpoint', '-q', mountpoint])
         return ret == 0
 
-    @staticmethod
-    def _mount_volume(volume_path, mountpoint):
-        try:
-            util.pread(['mount', volume_path, mountpoint])
-        except util.CommandException as e:
-            raise LinstorVolumeManagerError(
-                'Failed to mount volume {} on {}: {}'
-                .format(volume_path, mountpoint, e.code)
-            )
-
     @classmethod
-    def _umount_volume(cls, volume_path, mountpoint):
-        try:
-            if cls._is_mounted(mountpoint):
-                util.pread(['umount', mountpoint])
-        except util.CommandException as e:
-            raise LinstorVolumeManagerError(
-                'Failed to umount volume on {}: {}'
-                .format(volume_path, mountpoint, e.code)
-            )
+    def _mount_volume(cls, volume_path, mountpoint, mount=True):
+        if mount:
+            try:
+                util.pread(['mount', volume_path, mountpoint])
+            except util.CommandException as e:
+                raise LinstorVolumeManagerError(
+                    'Failed to mount volume {} on {}: {}'
+                    .format(volume_path, mountpoint, e.code)
+                )
+        else:
+            try:
+                if cls._is_mounted(mountpoint):
+                    util.pread(['umount', mountpoint])
+            except util.CommandException as e:
+                raise LinstorVolumeManagerError(
+                    'Failed to umount volume on {}: {}'
+                    .format(volume_path, mountpoint, e.code)
+                )
