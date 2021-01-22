@@ -173,7 +173,9 @@ class LinstorVolumeManager(object):
 
         # Ensure database is correctly mounted.
         # TODO: Maybe wait for sync if necessary.
+        # TODO: Avoid it on slave.
         try:
+            logger('Mouting LINSTOR database volume...')
             if not self._is_mounted(self.DATABASE_PATH):
                 self._mount_database_volume(
                     # TODO: Maybe avoid build device path.
