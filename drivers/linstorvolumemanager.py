@@ -1850,7 +1850,7 @@ class LinstorVolumeManager(object):
                 cls._activate_device_path(
                     lin, node_name, cls.DATABASE_VOLUME_NAME
                 )
-                return cls._request_device_path(
+                return cls._request_database_path(
                     cls.DATABASE_VOLUME_NAME, cls.DATABASE_VOLUME_NAME
                 )
             raise LinstorVolumeManagerError(
@@ -1952,7 +1952,7 @@ class LinstorVolumeManager(object):
             try:
                 os.rmdir(backup_path)
             except Exception:
-                raise LinstorVolumeManager(
+                raise LinstorVolumeManagerError(
                     'Failed to remove backup path {} of LINSTOR config {}'
                     .format(backup_path, e)
                 )
