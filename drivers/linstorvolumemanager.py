@@ -126,6 +126,7 @@ class LinstorVolumeManager(object):
     DATABASE_VOLUME_NAME = 'xcp-persistent-database'
     DATABASE_SIZE = 1 << 30  # 1GB.
     DATABASE_PATH = '/var/lib/linstor'
+    DATABASE_MKFS = 'mkfs.ext4'
 
     @staticmethod
     def default_logger(*args):
@@ -1918,11 +1919,11 @@ class LinstorVolumeManager(object):
             )
 
         try:
-            util.pread2(['mkfs.ext4', expected_device_path])
+            util.pread2([cls.DATABASE_MKFS, expected_device_path])
         except Exception as e:
             raise LinstorVolumeManagerError(
-               'Failed to execute mkfs.ext4 on database volume: {}'
-               .format(e)
+               'Failed to execute {} on database volume: {}'
+               .format(cls.DATABASE_MKFS, e)
             )
 
         return expected_device_path
