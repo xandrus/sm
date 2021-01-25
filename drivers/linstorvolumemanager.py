@@ -1290,16 +1290,19 @@ class LinstorVolumeManager(object):
 
         # 4. Remove storage pools/resource/volume group in the case of errors.
         except Exception as e:
+            logger('Destroying resource group and storage pools after fail...')
             try:
                 cls._destroy_resource_group(lin, group_name)
-            except Exception:
+            except Exception as e2:
+                logger('Failed to destroy resource group: {}'.format(e2))
                 pass
             j = 0
             i = min(i, len(node_names) - 1)
             while j <= i:
                 try:
                     cls._destroy_storage_pool(lin, group_name, node_names[j])
-                except Exception:
+                except Exception as e2:
+                    logger('Failed to destroy resource group: {}'.format(e2))
                     pass
                 j += 1
             raise e
@@ -2011,25 +2014,46 @@ class LinstorVolumeManager(object):
 
     @classmethod
     def _destroy_storage_pool(cls, lin, group_name, node_name):
-        result = lin.storage_pool_delete(node_name, group_name)
-        error_str = cls._get_error_str(result)
-        if error_str:
-            raise LinstorVolumeManagerError(
-                'Failed to destroy SP `{}` on node `{}`: {}'.format(
-                    group_name,
-                    node_name,
-                    error_str
+        def destroy():
+            result = lin.storage_pool_delete(node_name, group_name)
+            errors = cls._filter_errors(result)
+            if cls._check_errors(errors, [
+                linstor.consts.FAIL_NOT_FOUND_STOR_POOL,
+                linstor.consts.FAIL_NOT_FOUND_STOR_POOL_DFN
+            ]):
+                return
+
+            if errors:
+                raise LinstorVolumeManagerError(
+                    'Failed to destroy SP `{}` on node `{}`: {}'.format(
+                        volume_uuid,
+                        group_name,
+                        cls._get_error_str(errors)
+                    )
                 )
-            )
+
+        # We must retry to avoid errors like:
+        # "can not be deleted as volumes / snapshot-volumes are still using it"
+        # after LINSTOR database volume destruction.
+        return util.retry(destroy, maxretry=10)
 
     @classmethod
     def _destroy_resource_group(cls, lin, group_name):
-        result = lin.resource_group_delete(group_name)
-        error_str = cls._get_error_str(result)
-        if error_str:
-            raise LinstorVolumeManagerError(
-                'Failed to destroy RG `{}`: {}'.format(group_name, error_str)
-            )
+        def destroy():
+            result = lin.resource_group_delete(group_name)
+            errors = cls._filter_errors(result)
+            if cls._check_errors(errors, [
+                linstor.consts.FAIL_NOT_FOUND_RSC_GRP
+            ]):
+                return
+
+            if errors:
+                raise LinstorVolumeManagerError(
+                    'Failed to destroy RG `{}`: {}'
+                    .format(group_name, cls._get_error_str(errors))
+                )
+
+        return util.retry(destroy, maxretry=10)
 
     @classmethod
     def _build_group_name(cls, base_name):
