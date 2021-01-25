@@ -175,8 +175,8 @@ class LinstorVolumeManager(object):
         # TODO: Maybe wait for sync if necessary.
         # TODO: Avoid it on slave.
         try:
-            logger('Mouting LINSTOR database volume...')
             if not self._is_mounted(self.DATABASE_PATH):
+                logger('Repair: mounting LINSTOR database volume...')
                 self._mount_database_volume(
                     # TODO: Maybe avoid build device path.
                     self.build_device_path(self.DATABASE_VOLUME_NAME)
@@ -1267,17 +1267,27 @@ class LinstorVolumeManager(object):
 
             # 3. Create the LINSTOR database volume and mount it.
             try:
+                logger('Creating database volume...')
                 volume_path = cls._create_database_volume(lin, group_name)
-                try:
-                    cls._mount_database_volume(volume_path)
-                finally:
-                    # Ensure we are connected because controller has been
-                    # restarted during mount call.
-                    lin = cls._create_linstor_instance(uri)
             except LinstorVolumeManagerError as e:
                 if e.code != LinstorVolumeManagerError.ERR_VOLUME_EXISTS:
+                    logger('Destroying database volume after creation fail...')
                     cls._force_destroy_database_volume(lin, group_name)
                 raise
+
+            try:
+                logger('Mounting database volume...')
+                cls._mount_database_volume(volume_path)
+            except Exception as e:
+                # Ensure we are connected because controller has been
+                # restarted during mount call.
+                logger('Destroying database volume after mount fail...')
+                lin = cls._create_linstor_instance(uri)
+                cls._force_destroy_database_volume(lin, group_name)
+                raise e
+
+            lin = cls._create_linstor_instance(uri)
+
         # 4. Remove storage pools/resource/volume group in the case of errors.
         except Exception as e:
             try:
@@ -1905,11 +1915,11 @@ class LinstorVolumeManager(object):
             )
 
         try:
-            util.pread2(['mkfs.xfs', expected_device_path])
-        except util.CommandException as e:
+            util.pread2(['mkfs.ext4', expected_device_path])
+        except Exception as e:
             raise LinstorVolumeManagerError(
-              'Failed to execute mkfs.xfs on database volume: {}'
-              .format(e.code)
+               'Failed to execute mkfs.ext4 on database volume: {}'
+               .format(e)
             )
 
         return expected_device_path
@@ -2050,15 +2060,35 @@ class LinstorVolumeManager(object):
 
     @classmethod
     def _move_files(cls, src_dir, dest_dir, force=False):
-        try:
-            assert force or not os.listdir(dest_dir)
+        def listdir(dir):
+            ignored = ['lost+found']
+            return filter(lambda file: file not in ignored, os.listdir(dir))
 
-            for file in os.listdir(src_dir):
+        try:
+            if not force:
+                files = listdir(dest_dir)
+                if files:
+                    raise LinstorVolumeManagerError(
+                        'Cannot move files from {} to {} because destination '
+                        'contains: {}'.format(src_dir, dest_dir, files)
+                    )
+        except LinstorVolumeManagerError:
+            raise
+        except Exception as e:
+            raise LinstorVolumeManagerError(
+                'Cannot list dir {}: {}'.format(dest_dir, e)
+            )
+
+        try:
+            for file in listdir(src_dir):
                 try:
                     shutil.move(os.path.join(src_dir, file), dest_dir)
                 except Exception as e:
                     if not force:
-                        raise e
+                        raise LinstorVolumeManagerError(
+                            'Cannot move {}: {}'
+                            .format(file, e)
+                        )
         except Exception as e:
             if not force:
                 try:
@@ -2113,17 +2143,17 @@ class LinstorVolumeManager(object):
         if mount:
             try:
                 util.pread(['mount', volume_path, mountpoint])
-            except util.CommandException as e:
+            except Exception as e:
                 raise LinstorVolumeManagerError(
                     'Failed to mount volume {} on {}: {}'
-                    .format(volume_path, mountpoint, e.code)
+                    .format(volume_path, mountpoint, e)
                 )
         else:
             try:
                 if cls._is_mounted(mountpoint):
                     util.pread(['umount', mountpoint])
-            except util.CommandException as e:
+            except Exception as e:
                 raise LinstorVolumeManagerError(
                     'Failed to umount volume {} on {}: {}'
-                    .format(volume_path, mountpoint, e.code)
+                    .format(volume_path, mountpoint, e)
                 )
