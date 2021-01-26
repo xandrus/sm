@@ -1906,7 +1906,7 @@ class LinstorVolumeManager(object):
             'DrbdOptions/auto-quorum': 'disabled',
             'DrbdOptions/Resource/quorum': 'majority'
         })
-        error_str = self._get_error_str(result)
+        error_str = cls._get_error_str(result)
         if error_str:
             raise LinstorVolumeManagerError(
                 'Could not activate quorum on database volume: {}'
