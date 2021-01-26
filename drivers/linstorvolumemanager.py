@@ -1900,6 +1900,19 @@ class LinstorVolumeManager(object):
             definitions_only=False
         ), cls.DATABASE_VOLUME_NAME, group_name)
 
+        # We must modify the quorum. Otherwise we can't use correctly the
+        # minidrbdcluster daemon.
+        result = lin.resource_dfn_modify(cls.DATABASE_VOLUME_NAME, {
+            'DrbdOptions/auto-quorum': 'disabled',
+            'DrbdOptions/Resource/quorum': 'majority'
+        })
+        error_str = self._get_error_str(result)
+        if error_str:
+            raise LinstorVolumeManagerError(
+                'Could not activate quorum on database volume: {}'
+                .format(error_str)
+            )
+
         current_device_path = cls._request_database_path(lin, activate=True)
 
         # We use realpath here to get the /dev/drbd<id> path instead of
@@ -1949,27 +1962,33 @@ class LinstorVolumeManager(object):
             cls._start_controller(start=False)
 
             # 2. Create a backup config folder.
-            try:
-                os.mkdir(backup_path)
-            except Exception as e:
-                raise LinstorVolumeManagerError(
-                    'Failed to create backup path {} of LINSTOR config: {}'
-                    .format(backup_path, e)
-                )
+            database_not_empty = bool(os.listdir(cls.DATABASE_PATH))
+            if database_not_empty:
+                try:
+                    os.mkdir(backup_path)
+                except Exception as e:
+                    raise LinstorVolumeManagerError(
+                        'Failed to create backup path {} of LINSTOR config: {}'
+                        .format(backup_path, e)
+                    )
 
             # 3. Move the config in the mounted volume.
-            cls._move_files(cls.DATABASE_PATH, backup_path)
-            cls._mount_volume(volume_path, cls.DATABASE_PATH, mount)
-            cls._move_files(backup_path, cls.DATABASE_PATH)
+            if database_not_empty:
+                cls._move_files(cls.DATABASE_PATH, backup_path)
 
-            # 4. Remove useless backup directory.
-            try:
-                os.rmdir(backup_path)
-            except Exception:
-                raise LinstorVolumeManagerError(
-                    'Failed to remove backup path {} of LINSTOR config {}'
-                    .format(backup_path, e)
-                )
+            cls._mount_volume(volume_path, cls.DATABASE_PATH, mount)
+
+            if database_not_empty:
+                cls._move_files(backup_path, cls.DATABASE_PATH)
+
+                # 4. Remove useless backup directory.
+                try:
+                    os.rmdir(backup_path)
+                except Exception:
+                    raise LinstorVolumeManagerError(
+                        'Failed to remove backup path {} of LINSTOR config {}'
+                        .format(backup_path, e)
+                    )
         except Exception as e:
             def force_exec(fn):
                 try:
@@ -2107,7 +2126,15 @@ class LinstorVolumeManager(object):
         try:
             for file in listdir(src_dir):
                 try:
+                    dest_file = os.path.join(dest_dir, file)
+                    if os.path.exists(dest_file):
+                        raise LinstorVolumeManagerError(
+                            'Cannot move {} because it already exists in the '
+                            'destination'
+                        )
                     shutil.move(os.path.join(src_dir, file), dest_dir)
+                except LinstorVolumeManagerError:
+                    raise
                 except Exception as e:
                     if not force:
                         raise LinstorVolumeManagerError(
