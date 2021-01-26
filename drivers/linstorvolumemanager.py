@@ -2046,8 +2046,8 @@ class LinstorVolumeManager(object):
             if errors:
                 raise LinstorVolumeManagerError(
                     'Failed to destroy SP `{}` on node `{}`: {}'.format(
-                        volume_uuid,
                         group_name,
+                        node_name,
                         cls._get_error_str(errors)
                     )
                 )
