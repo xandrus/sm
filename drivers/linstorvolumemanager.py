@@ -50,7 +50,7 @@ def round_down(value, divisor):
 
 
 def get_remote_host_ip(node_name):
-    (ret, stdout, stderr) = doexec([
+    (ret, stdout, stderr) = util.doexec([
         'drbdsetup', 'show', DATABASE_VOLUME_NAME, '--json'
     ])
     if ret != 0:
@@ -73,7 +73,7 @@ def get_remote_host_ip(node_name):
 
 
 def get_controller_uri():
-    (ret, stdout, stderr) = doexec([
+    (ret, stdout, stderr) = util.doexec([
         'drbdadm', 'status', DATABASE_VOLUME_NAME
     ])
     if ret != 0:
@@ -1864,16 +1864,17 @@ class LinstorVolumeManager(object):
 
     @classmethod
     def _create_linstor_instance(cls, uri, keep_uri_unmodified=False):
+        retry = False
+
         def connect():
             try:
-                if not uri:
+                if retry and not keep_uri_unmodified:
                     uri = get_controller_uri()
                 instance = linstor.Linstor(uri, keep_alive=True)
                 instance.connect()
                 return instance
             except Exception:
-                if not keep_uri_unmodified:
-                    uri = None
+                retry = True
                 raise
 
         return util.retry(

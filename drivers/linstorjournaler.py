@@ -53,9 +53,11 @@ class LinstorJournaler:
             LinstorVolumeManager._build_sr_namespace()
         )
 
+        retry = False
+
         def connect():
             try:
-                if not uri:
+                if retry:
                     uri = get_controller_uri()
                 self._journal = linstor.KV(
                     LinstorVolumeManager._build_group_name(group_name),
@@ -63,7 +65,7 @@ class LinstorJournaler:
                     namespace=self._namespace
                 )
             except Exception:
-                uri = None
+                retry = True
                 raise
 
         util.retry(
