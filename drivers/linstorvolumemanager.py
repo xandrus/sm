@@ -27,6 +27,16 @@ import util
 import uuid
 
 
+# Contains the data of the "/var/lib/linstor" directory.
+DATABASE_VOLUME_NAME = 'xcp-persistent-database'
+DATABASE_SIZE = 1 << 30  # 1GB.
+DATABASE_PATH = '/var/lib/linstor'
+DATABASE_MKFS = 'mkfs.ext4'
+
+REG_DRBDADM_PRIMARY = re.compile("([^\\s]+)\\s+role:Primary")
+REG_DRBDSETUP_IP = re.compile('[^\\s]+\\s+(.*):.*$')
+
+
 def round_up(value, divisor):
     assert divisor
     divisor = int(divisor)
@@ -37,6 +47,49 @@ def round_down(value, divisor):
     assert divisor
     value = int(value)
     return value - (value % int(divisor))
+
+
+def get_remote_host_ip(node_name):
+    (ret, stdout, stderr) = doexec([
+        'drbdsetup', 'show', DATABASE_VOLUME_NAME, '--json'
+    ])
+    if ret != 0:
+        return
+
+    try:
+        conf = json.loads(stdout)
+        if not conf:
+            return
+
+        for connection in conf[0]['connections']:
+            if connection['net']['_name'] == node_name:
+                value = connection['path']['_remote_host']
+                res = REG_DRBDSETUP_IP.match(value)
+                if res:
+                    return res.groups()[0]
+                break
+    except Exception:
+        pass
+
+
+def get_controller_uri():
+    (ret, stdout, stderr) = doexec([
+        'drbdadm', 'status', DATABASE_VOLUME_NAME
+    ])
+    if ret != 0:
+        return
+
+    if stdout.startswith('{} role:Primary'.format(DATABASE_VOLUME_NAME)):
+        return 'linstor://localhost'
+
+    res = REG_DRBDADM_PRIMARY.search(stdout)
+    if res:
+        node_name = res.groups()[0]
+        ip = get_remote_host_ip(node_name)
+        if ip:
+            return 'linstor://' + ip
+
+    return
 
 
 class LinstorVolumeManagerError(Exception):
@@ -122,12 +175,6 @@ class LinstorVolumeManager(object):
     # the current pool status after N elapsed seconds.
     STORAGE_POOLS_FETCH_INTERVAL = 15
 
-    # Contains the data of the "/var/lib/linstor" directory.
-    DATABASE_VOLUME_NAME = 'xcp-persistent-database'
-    DATABASE_SIZE = 1 << 30  # 1GB.
-    DATABASE_PATH = '/var/lib/linstor'
-    DATABASE_MKFS = 'mkfs.ext4'
-
     @staticmethod
     def default_logger(*args):
         print(args)
@@ -176,11 +223,12 @@ class LinstorVolumeManager(object):
         # TODO: Maybe wait for sync if necessary.
         # TODO: Avoid it on slave.
         try:
-            if not self._is_mounted(self.DATABASE_PATH):
+            if not self._is_mounted(DATABASE_PATH):
+                # TODO: Do not mount, wait.
                 logger('Repair: mounting LINSTOR database volume...')
                 self._mount_database_volume(
                     # TODO: Maybe avoid build device path.
-                    self.build_device_path(self.DATABASE_VOLUME_NAME)
+                    self.build_device_path(DATABASE_VOLUME_NAME)
                 )
         finally:
             self._linstor = self._create_linstor_instance(uri)
@@ -1111,7 +1159,7 @@ class LinstorVolumeManager(object):
 
         # 3. Umount LINSTOR database.
         self._mount_database_volume(
-            self.build_device_path(self.DATABASE_VOLUME_NAME), mount=False
+            self.build_device_path(DATABASE_VOLUME_NAME), mount=False
         )
 
         # Ensure we are connected because controller has been
@@ -1119,7 +1167,7 @@ class LinstorVolumeManager(object):
         self._linstor = self._create_linstor_instance(self._uri)
 
         # 4. Destroy database volume.
-        self._destroy_resource(self.DATABASE_VOLUME_NAME)
+        self._destroy_resource(DATABASE_VOLUME_NAME)
 
         # TODO: Throw exceptions in the helpers below if necessary.
         # TODO: What's the required action if it exists remaining volumes?
@@ -1169,13 +1217,12 @@ class LinstorVolumeManager(object):
 
     @classmethod
     def create_sr(
-        cls, uri, group_name, node_names, redundancy,
+        cls, group_name, node_names, redundancy,
         thin_provisioning=False,
         logger=default_logger.__func__
     ):
         """
         Create a new SR on the given nodes.
-        :param str uri: URI to communicate with the LINSTOR controller.
         :param str group_name: The SR group_name to use.
         :param list[str] node_names: String list of nodes.
         :param int redundancy: How many copy of volumes should we store?
@@ -1185,7 +1232,9 @@ class LinstorVolumeManager(object):
         """
 
         # 1. Check if SR already exists.
-        lin = cls._create_linstor_instance(uri)
+        uri = 'linstor://localhost'
+
+        lin = cls._create_linstor_instance(uri, keep_uri_unmodified=True)
         driver_pool_name = group_name
         group_name = cls._build_group_name(group_name)
         pools = lin.storage_pool_list_raise(filter_by_stor_pools=[group_name])
@@ -1283,11 +1332,13 @@ class LinstorVolumeManager(object):
                 # Ensure we are connected because controller has been
                 # restarted during mount call.
                 logger('Destroying database volume after mount fail...')
-                lin = cls._create_linstor_instance(uri)
+                lin = cls._create_linstor_instance(
+                    uri, keep_uri_unmodified=True
+                )
                 cls._force_destroy_database_volume(lin, group_name)
                 raise e
 
-            lin = cls._create_linstor_instance(uri)
+            lin = cls._create_linstor_instance(uri, keep_uri_unmodified=True)
 
         # 4. Remove storage pools/resource/volume group in the case of errors.
         except Exception as e:
@@ -1812,11 +1863,18 @@ class LinstorVolumeManager(object):
         ])
 
     @classmethod
-    def _create_linstor_instance(cls, uri):
+    def _create_linstor_instance(cls, uri, keep_uri_unmodified=False):
         def connect():
-            instance = linstor.Linstor(uri, keep_alive=True)
-            instance.connect()
-            return instance
+            try:
+                if not uri:
+                    uri = get_controller_uri()
+                instance = linstor.Linstor(uri, keep_alive=True)
+                instance.connect()
+                return instance
+            except Exception:
+                if not keep_uri_unmodified:
+                    uri = None
+                raise
 
         return util.retry(
             connect,
@@ -1850,7 +1908,7 @@ class LinstorVolumeManager(object):
         try:
             resources = filter(
                 lambda resource: resource.node_name == node_name and
-                resource.name == cls.DATABASE_VOLUME_NAME,
+                resource.name == DATABASE_VOLUME_NAME,
                 lin.resource_list_raise().resources
             )
         except Exception as e:
@@ -1862,14 +1920,14 @@ class LinstorVolumeManager(object):
         if not resources:
             if activate:
                 cls._activate_device_path(
-                    lin, node_name, cls.DATABASE_VOLUME_NAME
+                    lin, node_name, DATABASE_VOLUME_NAME
                 )
                 return cls._request_database_path(
-                    cls.DATABASE_VOLUME_NAME, cls.DATABASE_VOLUME_NAME
+                    DATABASE_VOLUME_NAME, DATABASE_VOLUME_NAME
                 )
             raise LinstorVolumeManagerError(
                 'Empty dev path for `{}`, but definition "seems" to exist'
-                .format(cls.DATABASE_PATH)
+                .format(DATABASE_PATH)
             )
         # Contains a path of the /dev/drbd<id> form.
         return resources[0].volumes[0].device_path
@@ -1888,21 +1946,21 @@ class LinstorVolumeManager(object):
         if dfns:
             raise LinstorVolumeManagerError(
                 'Could not create volume `{}` from SR `{}`, '.format(
-                    cls.DATABASE_VOLUME_NAME, group_name
+                    DATABASE_VOLUME_NAME, group_name
                 ) + 'LINSTOR volume list must be empty.'
             )
 
-        size = cls.round_up_volume_size(cls.DATABASE_SIZE)
+        size = cls.round_up_volume_size(DATABASE_SIZE)
         cls._check_volume_creation_errors(lin.resource_group_spawn(
             rsc_grp_name=group_name,
-            rsc_dfn_name=cls.DATABASE_VOLUME_NAME,
+            rsc_dfn_name=DATABASE_VOLUME_NAME,
             vlm_sizes=['{}B'.format(size)],
             definitions_only=False
-        ), cls.DATABASE_VOLUME_NAME, group_name)
+        ), DATABASE_VOLUME_NAME, group_name)
 
         # We must modify the quorum. Otherwise we can't use correctly the
         # minidrbdcluster daemon.
-        result = lin.resource_dfn_modify(cls.DATABASE_VOLUME_NAME, {
+        result = lin.resource_dfn_modify(DATABASE_VOLUME_NAME, {
             'DrbdOptions/auto-quorum': 'disabled',
             'DrbdOptions/Resource/quorum': 'majority'
         })
@@ -1917,7 +1975,7 @@ class LinstorVolumeManager(object):
 
         # We use realpath here to get the /dev/drbd<id> path instead of
         # /dev/drbd/by-res/<resource_name>.
-        expected_device_path = cls.build_device_path(cls.DATABASE_VOLUME_NAME)
+        expected_device_path = cls.build_device_path(DATABASE_VOLUME_NAME)
         util.wait_for_path(expected_device_path, 5)
 
         device_realpath = os.path.realpath(expected_device_path)
@@ -1932,11 +1990,11 @@ class LinstorVolumeManager(object):
             )
 
         try:
-            util.pread2([cls.DATABASE_MKFS, expected_device_path])
+            util.pread2([DATABASE_MKFS, expected_device_path])
         except Exception as e:
             raise LinstorVolumeManagerError(
                'Failed to execute {} on database volume: {}'
-               .format(cls.DATABASE_MKFS, e)
+               .format(DATABASE_MKFS, e)
             )
 
         return expected_device_path
@@ -1944,17 +2002,17 @@ class LinstorVolumeManager(object):
     @classmethod
     def _destroy_database_volume(cls, lin, group_name):
         error_str = cls._get_error_str(
-            lin.resource_dfn_delete(cls.DATABASE_VOLUME_NAME)
+            lin.resource_dfn_delete(DATABASE_VOLUME_NAME)
         )
         if error_str:
             raise LinstorVolumeManagerError(
                 'Could not destroy resource `{}` from SR `{}`: {}'
-                .format(cls.DATABASE_VOLUME_NAME, group_name, error_str)
+                .format(DATABASE_VOLUME_NAME, group_name, error_str)
             )
 
     @classmethod
     def _mount_database_volume(cls, volume_path, mount=True):
-        backup_path = cls.DATABASE_PATH + '-' + str(uuid.uuid4())
+        backup_path = DATABASE_PATH + '-' + str(uuid.uuid4())
 
         try:
             # 1. First we must disable the controller to move safely the
@@ -1962,7 +2020,7 @@ class LinstorVolumeManager(object):
             cls._start_controller(start=False)
 
             # 2. Create a backup config folder.
-            database_not_empty = bool(os.listdir(cls.DATABASE_PATH))
+            database_not_empty = bool(os.listdir(DATABASE_PATH))
             if database_not_empty:
                 try:
                     os.mkdir(backup_path)
@@ -1974,12 +2032,12 @@ class LinstorVolumeManager(object):
 
             # 3. Move the config in the mounted volume.
             if database_not_empty:
-                cls._move_files(cls.DATABASE_PATH, backup_path)
+                cls._move_files(DATABASE_PATH, backup_path)
 
-            cls._mount_volume(volume_path, cls.DATABASE_PATH, mount)
+            cls._mount_volume(volume_path, DATABASE_PATH, mount)
 
             if database_not_empty:
-                cls._move_files(backup_path, cls.DATABASE_PATH)
+                cls._move_files(backup_path, DATABASE_PATH)
 
                 # 4. Remove useless backup directory.
                 try:
@@ -1997,24 +2055,24 @@ class LinstorVolumeManager(object):
                     pass
 
             if (
-                mount and cls._is_mounted(cls.DATABASE_PATH)
+                mount and cls._is_mounted(DATABASE_PATH)
             ) or (
-                not mount and not cls._is_mounted(cls.DATABASE_PATH)
+                not mount and not cls._is_mounted(DATABASE_PATH)
             ):
                 force_exec(lambda: cls._move_files(
-                    cls.DATABASE_PATH, backup_path
+                    DATABASE_PATH, backup_path
                 ))
                 force_exec(lambda: cls._mount_volume(
-                    volume_path, cls.DATABASE_PATH, not mount
+                    volume_path, DATABASE_PATH, not mount
                 ))
 
             if (
-                mount and not cls._is_mounted(cls.DATABASE_PATH)
+                mount and not cls._is_mounted(DATABASE_PATH)
             ) or (
-                not mount and cls._is_mounted(cls.DATABASE_PATH)
+                not mount and cls._is_mounted(DATABASE_PATH)
             ):
                 force_exec(lambda: cls._move_files(
-                    backup_path, cls.DATABASE_PATH
+                    backup_path, DATABASE_PATH
                 ))
 
             force_exec(lambda: os.rmdir(backup_path))

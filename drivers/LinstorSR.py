@@ -19,8 +19,10 @@ from constants import CBTLOG_TAG
 try:
     from linstorjournaler import LinstorJournaler
     from linstorvhdutil import LinstorVhdUtil
-    from linstorvolumemanager \
-        import LinstorVolumeManager, LinstorVolumeManagerError
+    from linstorvolumemanager import get_controller_uri
+    from linstorvolumemanager import LinstorVolumeManager
+    from linstorvolumemanager import LinstorVolumeManagerError
+
     LINSTOR_AVAILABLE = True
 except ImportError:
     LINSTOR_AVAILABLE = False
@@ -320,7 +322,6 @@ class LinstorSR(SR.SR):
             self._is_master = True
         self._group_name = self.dconf['group-name']
 
-        self._master_uri = None
         self._vdi_shared_time = 0
 
         self._initialized = False
@@ -340,23 +341,17 @@ class LinstorSR(SR.SR):
                 if self.srcmd.cmd == 'vdi_attach_from_config':
                     # We must have a valid LINSTOR instance here without using
                     # the XAPI.
-                    self._master_uri = 'linstor://{}'.format(
-                        util.get_master_address()
-                    )
+                    controller_uri = get_controller_uri()
                     self._journaler = LinstorJournaler(
-                        self._master_uri, self._group_name, logger=util.SMlog
+                        controller_uri, self._group_name, logger=util.SMlog
                     )
 
                     self._linstor = LinstorVolumeManager(
-                        self._master_uri,
+                        controller_uri,
                         self._group_name,
                         logger=util.SMlog
                     )
                 return method(self, *args, **kwargs)
-
-            self._master_uri = 'linstor://{}'.format(
-                util.get_master_rec(self.session)['address']
-            )
 
             if not self._is_master:
                 if self.cmd in [
@@ -376,22 +371,19 @@ class LinstorSR(SR.SR):
                     self._shared_lock_vdi(self.srcmd.params['vdi_uuid'])
                     self._vdi_shared_time = time.time()
 
-            self._journaler = LinstorJournaler(
-                self._master_uri, self._group_name, logger=util.SMlog
-            )
-
-            # Ensure ports are opened and LINSTOR controller/satellite
-            # are activated.
             if self.srcmd.cmd == 'sr_create':
+                # Ensure ports are opened and LINSTOR controller/satellite
+                # are activated.
                 # TODO: Disable if necessary
                 self._enable_linstor_on_all_hosts(status=True)
-
-            if self.srcmd.cmd != 'sr_create' and self.srcmd.cmd != 'sr_detach':
-                # At this moment the LinstorVolumeManager cannot be
-                # instantiated. Concerning the sr_detach command, we must
-                # ignore LINSTOR exceptions (if the volume group doesn't
-                # exist for example after a bad user action).
+            elif self.srcmd.cmd != 'sr_detach':
                 try:
+                    controller_uri = get_controller_uri()
+
+                    self._journaler = LinstorJournaler(
+                        controller_uri, self._group_name, logger=util.SMlog
+                    )
+
                     # Try to open SR if exists.
                     # We can repair only if we are on the master AND if
                     # we are trying to execute an exclusive operation.
@@ -399,7 +391,7 @@ class LinstorSR(SR.SR):
                     # during a snapshot. An exclusive op is the guarantee that
                     # the SR is locked.
                     self._linstor = LinstorVolumeManager(
-                        self._master_uri,
+                        controller_uri,
                         self._group_name,
                         repair=(
                             self._is_master and
@@ -507,7 +499,6 @@ class LinstorSR(SR.SR):
         # Throw if the SR already exists.
         try:
             self._linstor = LinstorVolumeManager.create_sr(
-                self._master_uri,
                 self._group_name,
                 self._hosts,
                 self._redundancy,

@@ -16,7 +16,7 @@
 #
 
 
-from linstorvolumemanager import LinstorVolumeManager
+from linstorvolumemanager import get_controller_uri, LinstorVolumeManager
 import linstor
 import re
 import util
@@ -54,11 +54,17 @@ class LinstorJournaler:
         )
 
         def connect():
-            self._journal = linstor.KV(
-                LinstorVolumeManager._build_group_name(group_name),
-                uri=uri,
-                namespace=self._namespace
-            )
+            try:
+                if not uri:
+                    uri = get_controller_uri()
+                self._journal = linstor.KV(
+                    LinstorVolumeManager._build_group_name(group_name),
+                    uri=uri,
+                    namespace=self._namespace
+                )
+            except Exception:
+                uri = None
+                raise
 
         util.retry(
             connect,

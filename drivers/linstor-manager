@@ -22,7 +22,7 @@ import XenAPIPlugin
 
 sys.path.append('/opt/xensource/sm/')
 from linstorjournaler import LinstorJournaler
-from linstorvolumemanager import LinstorVolumeManager
+from linstorvolumemanager import get_controller_uri, LinstorVolumeManager
 from lock import Lock
 import json
 import LinstorSR
@@ -32,10 +32,6 @@ import vhdutil
 
 FIREWALL_PORT_SCRIPT = '/etc/xapi.d/plugins/firewall-port'
 LINSTOR_PORTS = [3366, 3370, 3376, 3377, '7000:8000']
-
-
-def get_linstor_uri(session):
-    return 'linstor://{}'.format(util.get_master_rec(session)['address'])
 
 
 def update_port(port, open):
@@ -81,9 +77,9 @@ def attach(session, args):
         vdi_uuid = args['vdiUuid']
         group_name = args['groupName']
 
-        linstor_uri = get_linstor_uri(session)
+        controller_uri = get_controller_uri()
         journaler = LinstorJournaler(
-            linstor_uri, group_name, logger=util.SMlog
+            controller_uri, group_name, logger=util.SMlog
         )
         linstor = LinstorVolumeManager(
             linstor_uri,
@@ -104,7 +100,7 @@ def detach(session, args):
         group_name = args['groupName']
 
         linstor = LinstorVolumeManager(
-            get_linstor_uri(session),
+            get_controller_uri(),
             group_name,
             logger=util.SMlog
         )
@@ -133,7 +129,7 @@ def get_vhd_info(session, args):
         include_parent = distutils.util.strtobool(args['includeParent'])
 
         linstor = LinstorVolumeManager(
-            get_linstor_uri(session),
+            get_controller_uri(),
             group_name,
             logger=util.SMlog
         )
@@ -168,7 +164,7 @@ def get_parent(session, args):
         group_name = args['groupName']
 
         linstor = LinstorVolumeManager(
-            get_linstor_uri(session),
+            get_controller_uri(),
             group_name,
             logger=util.SMlog
         )
@@ -244,7 +240,7 @@ def lock_vdi(session, args):
             lock.acquire()
 
         linstor = LinstorVolumeManager(
-            get_linstor_uri(session),
+            get_controller_uri(),
             group_name,
             logger=util.SMlog
         )
