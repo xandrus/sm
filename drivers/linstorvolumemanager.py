@@ -1165,7 +1165,7 @@ class LinstorVolumeManager(object):
         # Ensure we are connected because controller has been
         # restarted during unmount call.
         self._linstor = self._create_linstor_instance(
-            self._linstor.controller_host
+            self._linstor.controller_host()
         )
 
         # 4. Destroy database volume.
@@ -1834,7 +1834,7 @@ class LinstorVolumeManager(object):
     def _create_linstor_kv(self, namespace):
         return linstor.KV(
             self._get_store_name(),
-            uri=self._linstor.controller_host,
+            uri=self._linstor.controller_host(),
             namespace=namespace
         )
 
