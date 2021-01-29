@@ -52,28 +52,27 @@ class LinstorJournaler:
         self._namespace = '{}journal/'.format(
             LinstorVolumeManager._build_sr_namespace()
         )
+        self._logger = logger
 
-        retry = False
+        def connect(uri):
+            if not uri:
+                uri = get_controller_uri()
+            self._journal = linstor.KV(
+                LinstorVolumeManager._build_group_name(group_name),
+                uri=uri,
+                namespace=self._namespace
+            )
 
-        def connect():
-            try:
-                if retry:
-                    uri = get_controller_uri()
-                self._journal = linstor.KV(
-                    LinstorVolumeManager._build_group_name(group_name),
-                    uri=uri,
-                    namespace=self._namespace
-                )
-            except Exception:
-                retry = True
-                raise
+        try:
+            return connect(uri)
+        except linstor.errors.LinstorNetworkError:
+            pass
 
         util.retry(
-            connect,
+            lambda: connect(None),
             maxretry=60,
             exceptions=[linstor.errors.LinstorNetworkError]
         )
-        self._logger = logger
 
     def create(self, type, identifier, value):
         # TODO: Maybe rename to 'add' in the future (in Citrix code too).

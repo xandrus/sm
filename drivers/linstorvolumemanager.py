@@ -215,7 +215,6 @@ class LinstorVolumeManager(object):
         :param function logger: Function to log messages.
         """
 
-        self._uri = uri
         self._linstor = self._create_linstor_instance(uri)
         self._base_group_name = group_name
 
@@ -1158,13 +1157,16 @@ class LinstorVolumeManager(object):
         # if volume_name in self._fetch_resource_names():
 
         # 3. Umount LINSTOR database.
+        # TODO: Must be called on the right host!!!
         self._mount_database_volume(
             self.build_device_path(DATABASE_VOLUME_NAME), mount=False
         )
 
         # Ensure we are connected because controller has been
         # restarted during unmount call.
-        self._linstor = self._create_linstor_instance(self._uri)
+        self._linstor = self._create_linstor_instance(
+            self._linstor.controller_host
+        )
 
         # 4. Destroy database volume.
         self._destroy_resource(DATABASE_VOLUME_NAME)
@@ -1361,7 +1363,6 @@ class LinstorVolumeManager(object):
 
         # 5. Return new instance.
         instance = cls.__new__(cls)
-        instance._uri = uri
         instance._linstor = lin
         instance._logger = logger
         instance._redundancy = redundancy
@@ -1833,7 +1834,7 @@ class LinstorVolumeManager(object):
     def _create_linstor_kv(self, namespace):
         return linstor.KV(
             self._get_store_name(),
-            uri=self._uri,
+            uri=self._linstor.controller_host,
             namespace=namespace
         )
 
@@ -1866,19 +1867,23 @@ class LinstorVolumeManager(object):
     def _create_linstor_instance(cls, uri, keep_uri_unmodified=False):
         retry = False
 
-        def connect():
-            try:
-                if retry and not keep_uri_unmodified:
-                    uri = get_controller_uri()
-                instance = linstor.Linstor(uri, keep_alive=True)
-                instance.connect()
-                return instance
-            except Exception:
-                retry = True
-                raise
+        def connect(uri):
+            if not uri:
+                uri = get_controller_uri()
+            instance = linstor.Linstor(uri, keep_alive=True)
+            instance.connect()
+            return instance
+
+        try:
+            return connect(uri)
+        except linstor.errors.LinstorNetworkError:
+            pass
+
+        if not keep_uri_unmodified:
+            uri = None
 
         return util.retry(
-            connect,
+            lambda: connect(uri),
             maxretry=60,
             exceptions=[linstor.errors.LinstorNetworkError]
         )
