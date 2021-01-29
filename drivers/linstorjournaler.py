@@ -53,7 +53,9 @@ class LinstorJournaler:
             LinstorVolumeManager._build_sr_namespace()
         )
         self._logger = logger
-        self._journal = self._create_journal_instance(uri, group_name)
+        self._journal = self._create_journal_instance(
+            uri, group_name, self._namespace
+        )
 
     def create(self, type, identifier, value):
         # TODO: Maybe rename to 'add' in the future (in Citrix code too).
@@ -139,14 +141,14 @@ class LinstorJournaler:
         self._journal.namespace = self._namespace
 
     @classmethod
-    def _create_journal_instance(cls, uri, group_name):
+    def _create_journal_instance(cls, uri, group_name, namespace):
         def connect(uri):
             if not uri:
                 uri = get_controller_uri()
             return linstor.KV(
                 LinstorVolumeManager._build_group_name(group_name),
                 uri=uri,
-                namespace=self._namespace
+                namespace=namespace
             )
 
         try:
